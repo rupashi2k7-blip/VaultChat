@@ -22,9 +22,8 @@ import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.util.List;
-import java.util.Random;
 
-/** Peer to peer encrypted chat over Wi-Fi, Bluetooth or an internet relay. */
+/** Peer to peer encrypted chat over Wi-Fi/hotspot or Bluetooth. */
 public class ChatActivity extends Activity implements Net.Listener {
 
     private static final int REQ_IMG = 21;
@@ -155,14 +154,12 @@ public class ChatActivity extends Activity implements Net.Listener {
         connectPanel.addView(Ui.title(this, "Connect two phones"));
         connectPanel.addView(Ui.spacer(this, 6));
         connectPanel.addView(Ui.label(this,
-                "Wi-Fi: same network. Bluetooth: no network at all, phones nearby. "
-                        + "Relay: anywhere on mobile data."));
+                "Wi-Fi: same network. Bluetooth: no network at all, phones nearby."));
         connectPanel.addView(Ui.spacer(this, 16));
 
         modeRow = Ui.row(this);
         modeRow.addView(seg("Wi-Fi", 0), segParams(0));
         modeRow.addView(seg("Bluetooth", 1), segParams(1));
-        modeRow.addView(seg("Relay", 2), segParams(2));
         connectPanel.addView(modeRow);
         connectPanel.addView(Ui.spacer(this, 16));
 
@@ -199,8 +196,7 @@ public class ChatActivity extends Activity implements Net.Listener {
         }
         panelBody.removeAllViews();
         if (m == 0) wifiPanel();
-        else if (m == 1) btPanel();
-        else relayPanel();
+        else btPanel();
     }
 
     private void wifiPanel() {
@@ -297,83 +293,6 @@ public class ChatActivity extends Activity implements Net.Listener {
                 }
             }
         });
-    }
-
-    private void relayPanel() {
-        panelBody.addView(Ui.label(this,
-                "Both phones need internet. They meet on a small relay server that only forwards "
-                        + "encrypted frames - it cannot read anything. You host the relay once; "
-                        + "the code is in the repository under relay/."));
-        panelBody.addView(Ui.spacer(this, 14));
-
-        panelBody.addView(Ui.label(this, "Relay server (host:port)"));
-        panelBody.addView(Ui.spacer(this, 6));
-        final EditText server = Ui.input(this, "my-relay.fly.dev:9000");
-        panelBody.addView(server);
-        panelBody.addView(Ui.spacer(this, 12));
-
-        panelBody.addView(Ui.label(this, "Room code (same on both phones)"));
-        panelBody.addView(Ui.spacer(this, 6));
-        final EditText room = Ui.input(this, "ROOM CODE");
-        room.setText(randomRoom());
-        room.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        panelBody.addView(room);
-        panelBody.addView(Ui.spacer(this, 10));
-
-        Button share = Ui.ghost(this, "Share room code");
-        share.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                try {
-                    Intent i = new Intent(Intent.ACTION_SEND);
-                    i.setType("text/plain");
-                    i.putExtra(Intent.EXTRA_TEXT,
-                            "VaultChat room: " + room.getText().toString().trim());
-                    startActivity(Intent.createChooser(i, "Share room code"));
-                } catch (Exception e) {
-                    Ui.toast(ChatActivity.this, "No app to share with");
-                }
-            }
-        });
-        panelBody.addView(share, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        panelBody.addView(Ui.spacer(this, 12));
-
-        Button connect = Ui.primary(this, "Connect through relay");
-        connect.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                String addr = server.getText().toString().trim();
-                final String code = room.getText().toString().trim();
-                if (addr.isEmpty() || code.isEmpty()) {
-                    Ui.toast(ChatActivity.this, "Fill the server and room code");
-                    return;
-                }
-                String host = addr;
-                int port = 9000;
-                int c = addr.lastIndexOf(':');
-                if (c > 0) {
-                    host = addr.substring(0, c);
-                    try {
-                        port = Integer.parseInt(addr.substring(c + 1));
-                    } catch (Exception ignored) {
-                    }
-                }
-                final String h = host;
-                final int p = port;
-                connectAsync("Joining room " + code + "...", new Connector() {
-                    public Net open() throws Exception {
-                        return Net.overRelay(h, p, code);
-                    }
-                });
-            }
-        });
-        panelBody.addView(connect, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-    }
-
-    private static String randomRoom() {
-        String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        Random r = new Random();
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 9; i++) sb.append(alphabet.charAt(r.nextInt(alphabet.length())));
-        return sb.toString();
     }
 
     private void ensureBt(final Runnable then) {

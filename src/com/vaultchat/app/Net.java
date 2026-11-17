@@ -32,8 +32,8 @@ import java.util.Collections;
 import javax.crypto.KeyAgreement;
 
 /**
- * End-to-end encrypted peer session. The transport underneath can be Wi-Fi/TCP,
- * Bluetooth RFCOMM or an internet relay; the encryption layer is identical.
+ * End-to-end encrypted peer session. The transport underneath can be Wi-Fi/TCP
+ * or Bluetooth RFCOMM; the encryption layer is identical.
  *
  * Handshake: ephemeral ECDH (secp256r1) -> HKDF-SHA256 -> two independent
  * AES-256-GCM keys, one per direction. Both phones show the same six-group
@@ -122,54 +122,6 @@ public class Net {
         Socket s = new Socket();
         s.connect(new InetSocketAddress(ip, PORT), 12000);
         return overSocket(s, true, "Wi-Fi");
-    }
-
-    /**
-     * Internet relay: both phones dial out to the relay, which pairs them by
-     * room code and forwards the (already encrypted) frames.
-     */
-    public static Net overRelay(String host, int port, String room) throws Exception {
-        Socket s = new Socket();
-        s.connect(new InetSocketAddress(host, port), 15000);
-        s.setTcpNoDelay(true);
-        s.setKeepAlive(true);
-        final Socket sock = s;
-
-        OutputStream o = s.getOutputStream();
-        o.write(("VC1 " + room + "\n").getBytes("UTF-8"));
-        o.flush();
-
-        String roleLine = readLine(s.getInputStream());
-        if (roleLine == null || !roleLine.startsWith("ROLE")) {
-            try {
-                s.close();
-            } catch (Exception ignored) {
-            }
-            throw new Exception("relay rejected the room");
-        }
-        boolean isClient = roleLine.trim().endsWith("1");
-
-        return new Net(s.getInputStream(), s.getOutputStream(), isClient, "Relay", new Closer() {
-            public void close() {
-                try {
-                    sock.close();
-                } catch (Exception ignored) {
-                }
-            }
-        });
-    }
-
-    /** Reads one newline-terminated line without over-reading the stream. */
-    private static String readLine(InputStream is) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = is.read()) != -1) {
-            if (c == '\n') break;
-            if (c != '\r') sb.append((char) c);
-            if (sb.length() > 64) throw new Exception("relay handshake too long");
-        }
-        if (c == -1 && sb.length() == 0) return null;
-        return sb.toString();
     }
 
     public static String localIp() {
