@@ -7,6 +7,8 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -30,11 +32,12 @@ import java.util.Collections;
 import javax.crypto.KeyAgreement;
 
 /**
- * End-to-end encrypted peer session over the local network.
+ * End-to-end encrypted peer session. The transport underneath can be Wi-Fi/TCP,
+ * Bluetooth RFCOMM or an internet relay; the encryption layer is identical.
  *
  * Handshake: ephemeral ECDH (secp256r1) -> HKDF-SHA256 -> two independent
  * AES-256-GCM keys, one per direction. Both phones show the same six-group
- * safety number, derived from both public keys, so a man in the middle can be
+ * safety number, derived from both public keys, so an interceptor can be
  * spotted by comparing the screen.
  *
  * Frame format: [4 byte length][12 byte IV][AES-GCM(type || payload)]
@@ -59,12 +62,17 @@ public class Net {
         void onClosed(String reason);
     }
 
+    public interface Closer {
+        void close();
+    }
+
     public static volatile Net active;
 
-    private final Socket sock;
     private final DataInputStream in;
     private final DataOutputStream out;
     private final boolean client;
+    private final String label;
+    private final Closer closer;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private byte[] outKey;
@@ -72,6 +80,97 @@ public class Net {
     private String safety = "";
     private volatile boolean closed;
     private volatile Listener listener;
+
+    // ---- factories ----
+
+    public static Net overSocket(Socket s, boolean client, String label) throws Exception {
+        s.setTcpNoDelay(true);
+        s.setKeepAlive(true);
+        final Socket sock = s;
+        return new Net(s.getInputStream(), s.getOutputStream(), client, label, new Closer() {
+            public void close() {
+                try {
+                    sock.close();
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    public static Net overStreams(InputStream rawIn, OutputStream rawOut, boolean client,
+                                  String label, Closer closer) throws Exception {
+        return new Net(rawIn, rawOut, client, label, closer);
+    }
+
+    /** Wi-Fi / hotspot: this phone listens. */
+    public static Net hostTcp() throws Exception {
+        ServerSocket ss = new ServerSocket(PORT);
+        ss.setSoTimeout(180000);
+        try {
+            Socket s = ss.accept();
+            return overSocket(s, false, "Wi-Fi");
+        } finally {
+            try {
+                ss.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** Wi-Fi / hotspot: connect to the other phone's IP. */
+    public static Net joinTcp(String ip) throws Exception {
+        Socket s = new Socket();
+        s.connect(new InetSocketAddress(ip, PORT), 12000);
+        return overSocket(s, true, "Wi-Fi");
+    }
+
+    /**
+     * Internet relay: both phones dial out to the relay, which pairs them by
+     * room code and forwards the (already encrypted) frames.
+     */
+    public static Net overRelay(String host, int port, String room) throws Exception {
+        Socket s = new Socket();
+        s.connect(new InetSocketAddress(host, port), 15000);
+        s.setTcpNoDelay(true);
+        s.setKeepAlive(true);
+        final Socket sock = s;
+
+        OutputStream o = s.getOutputStream();
+        o.write(("VC1 " + room + "\n").getBytes("UTF-8"));
+        o.flush();
+
+        String roleLine = readLine(s.getInputStream());
+        if (roleLine == null || !roleLine.startsWith("ROLE")) {
+            try {
+                s.close();
+            } catch (Exception ignored) {
+            }
+            throw new Exception("relay rejected the room");
+        }
+        boolean isClient = roleLine.trim().endsWith("1");
+
+        return new Net(s.getInputStream(), s.getOutputStream(), isClient, "Relay", new Closer() {
+            public void close() {
+                try {
+                    sock.close();
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    /** Reads one newline-terminated line without over-reading the stream. */
+    private static String readLine(InputStream is) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = is.read()) != -1) {
+            if (c == '\n') break;
+            if (c != '\r') sb.append((char) c);
+            if (sb.length() > 64) throw new Exception("relay handshake too long");
+        }
+        if (c == -1 && sb.length() == 0) return null;
+        return sb.toString();
+    }
 
     public static String localIp() {
         try {
@@ -88,30 +187,15 @@ public class Net {
         return null;
     }
 
-    public static Net host() throws Exception {
-        ServerSocket ss = new ServerSocket(PORT);
-        ss.setSoTimeout(180000);
-        try {
-            Socket s = ss.accept();
-            return new Net(s, false);
-        } finally {
-            try { ss.close(); } catch (Exception ignored) {}
-        }
-    }
+    // ---- session ----
 
-    public static Net join(String ip) throws Exception {
-        Socket s = new Socket();
-        s.connect(new InetSocketAddress(ip, PORT), 12000);
-        return new Net(s, true);
-    }
-
-    private Net(Socket s, boolean client) throws Exception {
-        this.sock = s;
+    private Net(InputStream rawIn, OutputStream rawOut, boolean client, String label, Closer closer)
+            throws Exception {
+        this.in = new DataInputStream(new BufferedInputStream(rawIn, 1 << 16));
+        this.out = new DataOutputStream(new BufferedOutputStream(rawOut, 1 << 16));
         this.client = client;
-        s.setTcpNoDelay(true);
-        s.setKeepAlive(true);
-        in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 1 << 16));
-        out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 1 << 16));
+        this.label = label;
+        this.closer = closer;
         handshake();
         startReader();
     }
@@ -124,8 +208,12 @@ public class Net {
         return safety;
     }
 
+    public String transport() {
+        return label;
+    }
+
     public boolean alive() {
-        return !closed && sock.isConnected() && !sock.isClosed();
+        return !closed;
     }
 
     private static byte[] pubBytes(PublicKey k) {
@@ -214,11 +302,10 @@ public class Net {
         }, "net-reader");
         t.setDaemon(true);
         t.start();
-        final Listener l = listener;
         ui.post(new Runnable() {
             public void run() {
-                if (listener != null) listener.onSafety(safety);
-                else if (l != null) l.onSafety(safety);
+                Listener l = listener;
+                if (l != null) l.onSafety(safety);
             }
         });
     }
@@ -274,7 +361,10 @@ public class Net {
         if (closed) return;
         closed = true;
         if (active == this) active = null;
-        try { sock.close(); } catch (Exception ignored) {}
+        try {
+            closer.close();
+        } catch (Exception ignored) {
+        }
         ui.post(new Runnable() {
             public void run() {
                 Listener l = listener;

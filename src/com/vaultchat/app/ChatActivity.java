@@ -2,9 +2,11 @@ package com.vaultchat.app;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
@@ -19,11 +21,14 @@ import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.util.List;
+import java.util.Random;
 
-/** Peer to peer encrypted chat over the local network. */
+/** Peer to peer encrypted chat over Wi-Fi, Bluetooth or an internet relay. */
 public class ChatActivity extends Activity implements Net.Listener {
 
     private static final int REQ_IMG = 21;
+    private static final int REQ_BT = 41;
 
     private LinearLayout msgs;
     private ScrollView scroll;
@@ -35,8 +40,12 @@ public class ChatActivity extends Activity implements Net.Listener {
     private TextView status;
     private TextView safety;
     private LinearLayout connectPanel;
+    private LinearLayout modeRow;
+    private LinearLayout panelBody;
     private Net net;
     private boolean connecting;
+    private int mode = 0;
+    private Runnable pendingBt;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -92,7 +101,7 @@ public class ChatActivity extends Activity implements Net.Listener {
         root.addView(safety);
 
         connectPanel = Ui.column(this);
-        Ui.pad(connectPanel, this, 22, 24, 22, 0);
+        Ui.pad(connectPanel, this, 18, 20, 18, 0);
         root.addView(connectPanel, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         buildConnectPanel();
 
@@ -139,83 +148,273 @@ public class ChatActivity extends Activity implements Net.Listener {
         }
     }
 
+    // ---- connection UI ----
+
     private void buildConnectPanel() {
         connectPanel.removeAllViews();
-        TextView h = Ui.title(this, "Connect two phones");
-        connectPanel.addView(h);
-        connectPanel.addView(Ui.spacer(this, 8));
+        connectPanel.addView(Ui.title(this, "Connect two phones"));
+        connectPanel.addView(Ui.spacer(this, 6));
         connectPanel.addView(Ui.label(this,
-                "Both phones must be on the same Wi-Fi or one phone's hotspot. "
-                        + "No internet and no server is used."));
-        connectPanel.addView(Ui.spacer(this, 20));
+                "Wi-Fi: same network. Bluetooth: no network at all, phones nearby. "
+                        + "Relay: anywhere on mobile data."));
+        connectPanel.addView(Ui.spacer(this, 16));
 
+        modeRow = Ui.row(this);
+        modeRow.addView(seg("Wi-Fi", 0), segParams(0));
+        modeRow.addView(seg("Bluetooth", 1), segParams(1));
+        modeRow.addView(seg("Relay", 2), segParams(2));
+        connectPanel.addView(modeRow);
+        connectPanel.addView(Ui.spacer(this, 16));
+
+        panelBody = Ui.column(this);
+        connectPanel.addView(panelBody);
+        showMode(0);
+    }
+
+    private LinearLayout.LayoutParams segParams(int i) {
+        LinearLayout.LayoutParams p = Ui.lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        int m = Ui.dp(this, 4);
+        p.setMargins(i == 0 ? 0 : m, 0, 0, 0);
+        return p;
+    }
+
+    private Button seg(String label, final int m) {
+        Button b = Ui.ghost(this, label);
+        b.setTag("seg" + m);
+        b.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showMode(m);
+            }
+        });
+        return b;
+    }
+
+    private void showMode(int m) {
+        mode = m;
+        for (int i = 0; i < modeRow.getChildCount(); i++) {
+            View v = modeRow.getChildAt(i);
+            boolean on = v.getTag().toString().equals("seg" + m);
+            v.setBackground(Ui.round(on ? Ui.ACCENT : Ui.CARD2, 14, this));
+            ((Button) v).setTextColor(on ? 0xFF06251B : Ui.TEXT);
+        }
+        panelBody.removeAllViews();
+        if (m == 0) wifiPanel();
+        else if (m == 1) btPanel();
+        else relayPanel();
+    }
+
+    private void wifiPanel() {
         Button host = Ui.primary(this, "Host on this phone");
         host.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                doHost();
+                connectAsync("Waiting for the other phone...", new Connector() {
+                    public Net open() throws Exception {
+                        return Net.hostTcp();
+                    }
+                });
+                String ip = Net.localIp();
+                Ui.toast(ChatActivity.this, "Your IP: " + (ip == null ? "check Wi-Fi" : ip));
             }
         });
-        connectPanel.addView(host, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        connectPanel.addView(Ui.spacer(this, 18));
-
-        connectPanel.addView(Ui.label(this, "Or join a host by IP address"));
-        connectPanel.addView(Ui.spacer(this, 8));
+        panelBody.addView(host, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        panelBody.addView(Ui.spacer(this, 16));
+        panelBody.addView(Ui.label(this, "Or join the host by IP address"));
+        panelBody.addView(Ui.spacer(this, 8));
         final EditText ip = Ui.input(this, "192.168.1.23");
-        ip.setInputType(InputType.TYPE_CLASS_TEXT);
-        connectPanel.addView(ip);
-        connectPanel.addView(Ui.spacer(this, 10));
+        panelBody.addView(ip);
+        panelBody.addView(Ui.spacer(this, 10));
         Button join = Ui.ghost(this, "Join");
         join.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                doJoin(ip.getText().toString().trim());
+                final String addr = ip.getText().toString().trim();
+                if (addr.isEmpty()) {
+                    Ui.toast(ChatActivity.this, "Enter the host IP first");
+                    return;
+                }
+                connectAsync("Connecting to " + addr + "...", new Connector() {
+                    public Net open() throws Exception {
+                        return Net.joinTcp(addr);
+                    }
+                });
             }
         });
-        connectPanel.addView(join, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        panelBody.addView(join, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
-    private void doHost() {
-        if (connecting) return;
-        connecting = true;
-        String ip = Net.localIp();
-        status.setText("Waiting for the other phone...");
-        Ui.toast(this, "Your IP: " + (ip == null ? "check Wi-Fi" : ip));
-        new Thread(new Runnable() {
-            public void run() {
-                try {
-                    final Net n = Net.host();
-                    runOnUiThread(new Runnable() {
-                        public void run() {
-                            connecting = false;
-                            net = n;
-                            Net.active = n;
-                            n.setListener(ChatActivity.this);
-                            onConnected();
-                        }
-                    });
-                } catch (final Exception e) {
-                    runOnUiThread(new Runnable() {
-                        public void run() {
-                            connecting = false;
-                            status.setText("Could not host: " + e.getClass().getSimpleName());
-                        }
-                    });
-                }
-            }
-        }).start();
-    }
-
-    private void doJoin(final String ip) {
-        if (connecting) return;
-        if (ip.isEmpty()) {
-            Ui.toast(this, "Enter the host IP first");
+    private void btPanel() {
+        if (!Bt.available()) {
+            panelBody.addView(Ui.label(this, "Bluetooth is off or not available on this phone."));
+            panelBody.addView(Ui.spacer(this, 10));
+            panelBody.addView(Ui.label(this, "Turn Bluetooth on in the system settings, then come back."));
             return;
         }
+        panelBody.addView(Ui.label(this,
+                "No Wi-Fi, no hotspot, no internet. Pair the two phones once in Bluetooth settings, then connect here. Range is about 10 metres."));
+        panelBody.addView(Ui.spacer(this, 14));
+
+        Button host = Ui.primary(this, "Host: wait for the other phone");
+        host.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                ensureBt(new Runnable() {
+                    public void run() {
+                        connectAsync("Waiting for Bluetooth connection...", new Connector() {
+                            public Net open() throws Exception {
+                                return Bt.host();
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        panelBody.addView(host, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        panelBody.addView(Ui.spacer(this, 16));
+        panelBody.addView(Ui.label(this, "Or pick a paired device to connect to"));
+        panelBody.addView(Ui.spacer(this, 8));
+
+        ensureBt(new Runnable() {
+            public void run() {
+                List<String[]> devices = Bt.bonded();
+                if (devices.isEmpty()) {
+                    panelBody.addView(Ui.label(ChatActivity.this,
+                            "No paired devices. Pair the other phone in Bluetooth settings first."));
+                    return;
+                }
+                for (final String[] d : devices) {
+                    Button b = Ui.ghost(ChatActivity.this, d[0]);
+                    b.setOnClickListener(new View.OnClickListener() {
+                        public void onClick(View v) {
+                            connectAsync("Connecting to " + d[0] + "...", new Connector() {
+                                public Net open() throws Exception {
+                                    return Bt.join(d[1]);
+                                }
+                            });
+                        }
+                    });
+                    LinearLayout.LayoutParams p = Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+                    p.setMargins(0, 0, 0, Ui.dp(ChatActivity.this, 8));
+                    panelBody.addView(b, p);
+                }
+            }
+        });
+    }
+
+    private void relayPanel() {
+        panelBody.addView(Ui.label(this,
+                "Both phones need internet. They meet on a small relay server that only forwards "
+                        + "encrypted frames - it cannot read anything. You host the relay once; "
+                        + "the code is in the repository under relay/."));
+        panelBody.addView(Ui.spacer(this, 14));
+
+        panelBody.addView(Ui.label(this, "Relay server (host:port)"));
+        panelBody.addView(Ui.spacer(this, 6));
+        final EditText server = Ui.input(this, "my-relay.fly.dev:9000");
+        panelBody.addView(server);
+        panelBody.addView(Ui.spacer(this, 12));
+
+        panelBody.addView(Ui.label(this, "Room code (same on both phones)"));
+        panelBody.addView(Ui.spacer(this, 6));
+        final EditText room = Ui.input(this, "ROOM CODE");
+        room.setText(randomRoom());
+        room.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        panelBody.addView(room);
+        panelBody.addView(Ui.spacer(this, 10));
+
+        Button share = Ui.ghost(this, "Share room code");
+        share.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                try {
+                    Intent i = new Intent(Intent.ACTION_SEND);
+                    i.setType("text/plain");
+                    i.putExtra(Intent.EXTRA_TEXT,
+                            "VaultChat room: " + room.getText().toString().trim());
+                    startActivity(Intent.createChooser(i, "Share room code"));
+                } catch (Exception e) {
+                    Ui.toast(ChatActivity.this, "No app to share with");
+                }
+            }
+        });
+        panelBody.addView(share, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        panelBody.addView(Ui.spacer(this, 12));
+
+        Button connect = Ui.primary(this, "Connect through relay");
+        connect.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String addr = server.getText().toString().trim();
+                final String code = room.getText().toString().trim();
+                if (addr.isEmpty() || code.isEmpty()) {
+                    Ui.toast(ChatActivity.this, "Fill the server and room code");
+                    return;
+                }
+                String host = addr;
+                int port = 9000;
+                int c = addr.lastIndexOf(':');
+                if (c > 0) {
+                    host = addr.substring(0, c);
+                    try {
+                        port = Integer.parseInt(addr.substring(c + 1));
+                    } catch (Exception ignored) {
+                    }
+                }
+                final String h = host;
+                final int p = port;
+                connectAsync("Joining room " + code + "...", new Connector() {
+                    public Net open() throws Exception {
+                        return Net.overRelay(h, p, code);
+                    }
+                });
+            }
+        });
+        panelBody.addView(connect, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    private static String randomRoom() {
+        String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        Random r = new Random();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 9; i++) sb.append(alphabet.charAt(r.nextInt(alphabet.length())));
+        return sb.toString();
+    }
+
+    private void ensureBt(final Runnable then) {
+        if (Build.VERSION.SDK_INT < 31) {
+            then.run();
+            return;
+        }
+        if (checkSelfPermission("android.permission.BLUETOOTH_CONNECT") == PackageManager.PERMISSION_GRANTED) {
+            then.run();
+            return;
+        }
+        pendingBt = then;
+        requestPermissions(new String[]{"android.permission.BLUETOOTH_CONNECT"}, REQ_BT);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] granted) {
+        super.onRequestPermissionsResult(code, perms, granted);
+        if (code == REQ_BT) {
+            boolean ok = granted.length > 0 && granted[0] == PackageManager.PERMISSION_GRANTED;
+            if (ok && pendingBt != null) {
+                pendingBt.run();
+            } else if (!ok) {
+                Ui.toast(this, "Bluetooth permission is needed for this mode");
+            }
+            pendingBt = null;
+        }
+    }
+
+    private interface Connector {
+        Net open() throws Exception;
+    }
+
+    private void connectAsync(final String what, final Connector c) {
+        if (connecting) return;
         connecting = true;
-        status.setText("Connecting to " + ip + "...");
+        status.setText(what);
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    final Net n = Net.join(ip);
+                    final Net n = c.open();
                     runOnUiThread(new Runnable() {
                         public void run() {
                             connecting = false;
@@ -238,7 +437,7 @@ public class ChatActivity extends Activity implements Net.Listener {
     }
 
     private void onConnected() {
-        status.setText("Connected · encrypted");
+        status.setText("Connected · " + net.transport() + " · encrypted");
         connectPanel.setVisibility(View.GONE);
         scroll.setVisibility(View.VISIBLE);
         send.setEnabled(true);
@@ -247,7 +446,8 @@ public class ChatActivity extends Activity implements Net.Listener {
         video.setEnabled(true);
         safety.setVisibility(View.VISIBLE);
         safety.setText("Safety number: " + (net.safetyCode().isEmpty() ? "..." : net.safetyCode()));
-        addBubble("Connected. Compare the safety number on both phones to rule out an interceptor.", true);
+        addBubble("Connected over " + net.transport()
+                + ". Compare the safety number on both phones to rule out an interceptor.", true);
     }
 
     private void doSend() {
@@ -301,11 +501,11 @@ public class ChatActivity extends Activity implements Net.Listener {
         }
     }
 
-    private void startCall(int mode, boolean incoming) {
+    private void startCall(int callMode, boolean incoming) {
         if (net == null) return;
-        if (!incoming) net.send(Net.T_CALL_REQ, new byte[]{(byte) mode});
+        if (!incoming) net.send(Net.T_CALL_REQ, new byte[]{(byte) callMode});
         Intent i = new Intent(this, CallActivity.class);
-        i.putExtra("mode", mode);
+        i.putExtra("mode", callMode);
         i.putExtra("incoming", incoming);
         startActivity(i);
     }
@@ -316,8 +516,6 @@ public class ChatActivity extends Activity implements Net.Listener {
         Ui.pad(tv, this, 14, 10, 14, 10);
         LinearLayout wrap = Ui.row(this);
         wrap.setGravity(mine ? Gravity.END : Gravity.START);
-        LinearLayout.LayoutParams p = Ui.lp(0, LinearLayout.LayoutParams.WRAP_CONTENT);
-        p.weight = 0;
         wrap.addView(tv);
         LinearLayout.LayoutParams outer = Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -373,8 +571,8 @@ public class ChatActivity extends Activity implements Net.Listener {
                 }
             }
         } else if (type == Net.T_CALL_REQ) {
-            int mode = payload.length > 0 ? payload[0] : 1;
-            startCall(mode, true);
+            int callMode = payload.length > 0 ? payload[0] : 1;
+            startCall(callMode, true);
         }
     }
 
