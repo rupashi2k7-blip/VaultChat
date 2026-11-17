@@ -154,12 +154,14 @@ public class ChatActivity extends Activity implements Net.Listener {
         connectPanel.addView(Ui.title(this, "Connect two phones"));
         connectPanel.addView(Ui.spacer(this, 6));
         connectPanel.addView(Ui.label(this,
-                "Wi-Fi: same network. Bluetooth: no network at all, phones nearby."));
+                "Wi-Fi: same network. Bluetooth: no network at all. "
+                        + "Internet: anywhere, both phones need data and the same server."));
         connectPanel.addView(Ui.spacer(this, 16));
 
         modeRow = Ui.row(this);
         modeRow.addView(seg("Wi-Fi", 0), segParams(0));
         modeRow.addView(seg("Bluetooth", 1), segParams(1));
+        modeRow.addView(seg("Internet", 2), segParams(2));
         connectPanel.addView(modeRow);
         connectPanel.addView(Ui.spacer(this, 16));
 
@@ -196,7 +198,8 @@ public class ChatActivity extends Activity implements Net.Listener {
         }
         panelBody.removeAllViews();
         if (m == 0) wifiPanel();
-        else btPanel();
+        else if (m == 1) btPanel();
+        else internetPanel();
     }
 
     private void wifiPanel() {
@@ -295,6 +298,121 @@ public class ChatActivity extends Activity implements Net.Listener {
         });
     }
 
+    private void internetPanel() {
+        final android.content.SharedPreferences sp = getSharedPreferences("vc", 0);
+        String server = sp.getString("srv", "");
+        String myId = sp.getString("myid", "");
+
+        if (server.isEmpty() || myId.isEmpty()) {
+            panelBody.addView(Ui.label(this,
+                    "One-time setup. Both phones use the same server address, and each phone needs "
+                            + "its own name or phone number. The server never sees your messages."));
+            panelBody.addView(Ui.spacer(this, 12));
+            panelBody.addView(Ui.label(this, "Server (host:port)"));
+            panelBody.addView(Ui.spacer(this, 6));
+            final EditText srv = Ui.input(this, "my-server.example.com:9000");
+            srv.setText(server);
+            panelBody.addView(srv);
+            panelBody.addView(Ui.spacer(this, 12));
+            panelBody.addView(Ui.label(this, "Your name or phone number"));
+            panelBody.addView(Ui.spacer(this, 6));
+            final EditText me = Ui.input(this, "9876543210");
+            me.setText(myId);
+            panelBody.addView(me);
+            panelBody.addView(Ui.spacer(this, 12));
+            Button save = Ui.primary(this, "Save");
+            save.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    String a = srv.getText().toString().trim();
+                    String b = me.getText().toString().trim().replace(" ", "");
+                    if (a.isEmpty() || b.isEmpty()) {
+                        Ui.toast(ChatActivity.this, "Fill both fields");
+                        return;
+                    }
+                    sp.edit().putString("srv", a).putString("myid", b).apply();
+                    showMode(2);
+                }
+            });
+            panelBody.addView(save, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+
+        panelBody.addView(Ui.label(this, "You are " + myId + " on " + server));
+        Button change = Ui.ghost(this, "Change setup");
+        change.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                sp.edit().remove("srv").remove("myid").apply();
+                showMode(2);
+            }
+        });
+        LinearLayout.LayoutParams cp = Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        cp.setMargins(0, Ui.dp(this, 8), 0, 0);
+        panelBody.addView(change, cp);
+        panelBody.addView(Ui.spacer(this, 16));
+
+        panelBody.addView(Ui.label(this, "Call by name or number"));
+        panelBody.addView(Ui.spacer(this, 6));
+        final EditText target = Ui.input(this, "9876543210");
+        panelBody.addView(target);
+        panelBody.addView(Ui.spacer(this, 8));
+
+        final String serverAddr = server;
+        final String meId = myId;
+
+        Button call = Ui.primary(this, "Call");
+        call.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                final String other = target.getText().toString().trim().replace(" ", "");
+                if (other.isEmpty()) {
+                    Ui.toast(ChatActivity.this, "Enter the other name or number");
+                    return;
+                }
+                final String[] hp = splitHostPort(serverAddr);
+                connectAsync("Calling " + other + "...", new Connector() {
+                    public Net open() throws Exception {
+                        return Net.overSwitchboard(hp[0], Integer.parseInt(hp[1]), meId, other, false);
+                    }
+                });
+            }
+        });
+        panelBody.addView(call, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        panelBody.addView(Ui.spacer(this, 18));
+        panelBody.addView(Ui.label(this, "Or keep the app open and wait for someone to call you"));
+        panelBody.addView(Ui.spacer(this, 8));
+
+        Button wait = Ui.ghost(this, "Wait for a call");
+        wait.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                final String[] hp = splitHostPort(serverAddr);
+                connectAsync("Waiting for a call...", new Connector() {
+                    public Net open() throws Exception {
+                        return Net.overSwitchboard(hp[0], Integer.parseInt(hp[1]), meId, "", true);
+                    }
+                });
+            }
+        });
+        panelBody.addView(wait, Ui.lp(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    private static String[] splitHostPort(String addr) {
+        String host = addr;
+        int port = 9000;
+        int c = addr.lastIndexOf(':');
+        if (c > 0) {
+            host = addr.substring(0, c);
+            try {
+                port = Integer.parseInt(addr.substring(c + 1));
+            } catch (Exception ignored) {
+            }
+        }
+        return new String[]{host, String.valueOf(port)};
+    }
+
     private void ensureBt(final Runnable then) {
         if (Build.VERSION.SDK_INT < 31) {
             then.run();
@@ -347,7 +465,9 @@ public class ChatActivity extends Activity implements Net.Listener {
                     runOnUiThread(new Runnable() {
                         public void run() {
                             connecting = false;
-                            status.setText("Could not connect: " + e.getClass().getSimpleName());
+                            String msg = e.getMessage();
+                            status.setText("Could not connect: "
+                                    + (msg == null || msg.isEmpty() ? e.getClass().getSimpleName() : msg));
                         }
                     });
                 }
@@ -356,7 +476,9 @@ public class ChatActivity extends Activity implements Net.Listener {
     }
 
     private void onConnected() {
-        status.setText("Connected · " + net.transport() + " · encrypted");
+        String who = net.peerName();
+        status.setText("Connected" + (who == null || who.isEmpty() ? "" : " to " + who)
+                + " · " + net.transport() + " · encrypted");
         connectPanel.setVisibility(View.GONE);
         scroll.setVisibility(View.VISIBLE);
         send.setEnabled(true);

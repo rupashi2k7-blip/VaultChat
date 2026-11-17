@@ -80,6 +80,7 @@ public class Net {
     private String safety = "";
     private volatile boolean closed;
     private volatile Listener listener;
+    private volatile String peer = "";
 
     // ---- factories ----
 
@@ -124,6 +125,70 @@ public class Net {
         return overSocket(s, true, "Wi-Fi");
     }
 
+    /**
+     * Internet switchboard: both phones dial out to a server and are paired by
+     * name / phone number. The server only forwards the encrypted stream.
+     *
+     * @param wait true = "put me in a call when someone calls me",
+     *             false = "connect me to target"
+     */
+    public static Net overSwitchboard(String host, int port, String myId, String target,
+                                      boolean wait) throws Exception {
+        Socket s = new Socket();
+        s.connect(new InetSocketAddress(host, port), 15000);
+        s.setTcpNoDelay(true);
+        s.setKeepAlive(true);
+        final Socket sock = s;
+
+        OutputStream o = s.getOutputStream();
+        o.write(("VC1 " + myId + "\n").getBytes("UTF-8"));
+        o.flush();
+
+        String ack = readLine(s.getInputStream());
+        if (ack == null) throw new Exception("no reply from server");
+        if (!ack.startsWith("OK")) {
+            try { s.close(); } catch (Exception ignored) {}
+            if (ack.contains("busy")) throw new Exception("that name is already online");
+            throw new Exception("server refused: " + ack.replace("ERR ", ""));
+        }
+
+        o.write((wait ? "WAIT\n" : ("CALL " + target + "\n")).getBytes("UTF-8"));
+        o.flush();
+
+        String reply = readLine(s.getInputStream());
+        if (reply == null) throw new Exception("no reply from server");
+        if (reply.startsWith("ERR")) {
+            try { s.close(); } catch (Exception ignored) {}
+            if (reply.contains("offline")) throw new Exception("that name is not waiting for a call");
+            throw new Exception("server refused: " + reply.replace("ERR ", ""));
+        }
+
+        String[] parts = reply.split(" ");
+        boolean isClient = parts.length > 1 && parts[1].equals("1");
+        String peerId = parts.length > 2 ? parts[2] : "";
+
+        Net n = new Net(s.getInputStream(), s.getOutputStream(), isClient, "Internet", new Closer() {
+            public void close() {
+                try { sock.close(); } catch (Exception ignored) {}
+            }
+        });
+        n.setPeer(peerId);
+        return n;
+    }
+
+    /** Reads one newline-terminated line without over-reading the stream. */
+    private static String readLine(InputStream is) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = is.read()) != -1) {
+            if (c == '\n') break;
+            if (c != '\r') sb.append((char) c);
+            if (sb.length() > 64) throw new Exception("server handshake too long");
+        }
+        if (c == -1 && sb.length() == 0) return null;
+        return sb.toString();
+    }
+
     public static String localIp() {
         try {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
@@ -162,6 +227,14 @@ public class Net {
 
     public String transport() {
         return label;
+    }
+
+    public void setPeer(String p) {
+        peer = p == null ? "" : p;
+    }
+
+    public String peerName() {
+        return peer;
     }
 
     public boolean alive() {
